@@ -2,30 +2,35 @@ const messagesEl = document.getElementById("messages");
 
 let lastEventId = 0;
 
-const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
+function connect() {
+	const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
 
-ws.addEventListener("open", () => {
-	console.log("Connected to UDDI server");
-	ws.send(JSON.stringify({ type: "sync", last_event_id: lastEventId }));
-});
+	ws.addEventListener("open", () => {
+		console.log("Connected to UDDI server");
+		ws.send(JSON.stringify({ type: "sync", last_event_id: lastEventId }));
+	});
 
-ws.addEventListener("message", (event) => {
-	try {
-		const data = JSON.parse(event.data);
-		if (data.type === "message") {
-			lastEventId = data.event_id;
-			console.log("lastEventId:", lastEventId);
-			addMessage(data.content);
+	ws.addEventListener("message", (event) => {
+		try {
+			const data = JSON.parse(event.data);
+			if (data.type === "message") {
+				lastEventId = data.event_id;
+				console.log("lastEventId:", lastEventId);
+				addMessage(data.content);
+			}
+		} catch (e) {
+			// Non-JSON message (e.g. welcome text), ignore
+			console.log("Non-JSON message:", event.data);
 		}
-	} catch (e) {
-		// Non-JSON message (e.g. welcome text), ignore
-		console.log("Non-JSON message:", event.data);
-	}
-});
+	});
 
-ws.addEventListener("close", () => {
-	console.log("Disconnected from UDDI server");
-});
+	ws.addEventListener("close", () => {
+		console.log("Disconnected from UDDI server, reconnecting in 3s...");
+		setTimeout(connect, 3000);
+	});
+}
+
+connect();
 
 function addMessage(text) {
 	const msg = document.createElement("div");
