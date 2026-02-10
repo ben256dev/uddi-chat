@@ -1,13 +1,26 @@
 const messagesEl = document.getElementById("messages");
 
-const ws = new WebSocket(`ws://${location.host}/ws`);
+let lastEventId = 0;
+
+const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
 
 ws.addEventListener("open", () => {
 	console.log("Connected to UDDI server");
+	ws.send(JSON.stringify({ type: "sync", last_event_id: lastEventId }));
 });
 
 ws.addEventListener("message", (event) => {
-	addMessage(event.data);
+	try {
+		const data = JSON.parse(event.data);
+		if (data.type === "message") {
+			lastEventId = data.event_id;
+			console.log("lastEventId:", lastEventId);
+			addMessage(data.content);
+		}
+	} catch (e) {
+		// Non-JSON message (e.g. welcome text), ignore
+		console.log("Non-JSON message:", event.data);
+	}
 });
 
 ws.addEventListener("close", () => {

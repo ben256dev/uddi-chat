@@ -2,17 +2,49 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
+type OutgoingMessage struct {
+	Type      string `json:"type"`
+	EventID   int64  `json:"event_id"`
+	Content   string `json:"content"`
+	UserID    string `json:"user_id"`
+	ChannelID string `json:"channel_id"`
+}
+
+type IncomingSync struct {
+	Type        string `json:"type"`
+	LastEventID int64  `json:"last_event_id"`
+}
+
 var db *sql.DB
+
+var (
+	clients   = make(map[*websocket.Conn]bool)
+	clientsMu sync.Mutex
+)
+
+func broadcast(data []byte) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	for conn := range clients {
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			log.Println("Broadcast write failed:", err)
+			conn.Close()
+			delete(clients, conn)
+		}
+	}
+}
 
 func homePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Home Page")
@@ -25,12 +57,20 @@ var upgrader = websocket.Upgrader{
 
 func reader(conn *websocket.Conn) {
 	for {
-		messageType, p, err := conn.ReadMessage()
+		_, p, err := conn.ReadMessage()
 		if err != nil {
 			log.Println(err)
 			return
 		}
 
+		// Try to parse as JSON sync request
+		var incoming IncomingSync
+		if json.Unmarshal(p, &incoming) == nil && incoming.Type == "sync" {
+			handleSync(conn, incoming.LastEventID)
+			continue
+		}
+
+		// Otherwise treat as plain chat message
 		content := string(p)
 		fmt.Println(content)
 
@@ -45,16 +85,59 @@ func reader(conn *websocket.Conn) {
 			log.Fatal(err)
 		}
 
-		_, err = db.Exec(
+		var eventID int64
+		err = db.QueryRow(
 			`INSERT INTO events (event_type, message_id, user_id, channel_id, created_at)
-			 VALUES ($1, $2, $3, $4, NOW())`,
+			 VALUES ($1, $2, $3, $4, NOW())
+			 RETURNING id`,
 			"message_sent", messageID, "anonymous", "general",
-		)
+		).Scan(&eventID)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		if err := conn.WriteMessage(messageType, p); err != nil {
+		reply := OutgoingMessage{
+			Type:      "message",
+			EventID:   eventID,
+			Content:   content,
+			UserID:    "anonymous",
+			ChannelID: "general",
+		}
+		replyJSON, err := json.Marshal(reply)
+		if err != nil {
+			log.Println("Failed to marshal reply:", err)
+			return
+		}
+		broadcast(replyJSON)
+	}
+}
+
+func handleSync(conn *websocket.Conn, lastEventID int64) {
+	rows, err := db.Query(
+		`SELECT e.id, m.content, m.user_id, m.channel_id
+		 FROM events e JOIN messages m ON e.message_id = m.id
+		 WHERE e.id > $1 ORDER BY e.id ASC`,
+		lastEventID,
+	)
+	if err != nil {
+		log.Println("Sync query failed:", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var msg OutgoingMessage
+		if err := rows.Scan(&msg.EventID, &msg.Content, &msg.UserID, &msg.ChannelID); err != nil {
+			log.Println("Sync row scan failed:", err)
+			return
+		}
+		msg.Type = "message"
+		data, err := json.Marshal(msg)
+		if err != nil {
+			log.Println("Sync marshal failed:", err)
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 			log.Println(err)
 			return
 		}
@@ -71,6 +154,18 @@ func websocketEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Println("Client Connected")
+
+	clientsMu.Lock()
+	clients[ws] = true
+	clientsMu.Unlock()
+
+	defer func() {
+		clientsMu.Lock()
+		delete(clients, ws)
+		clientsMu.Unlock()
+		ws.Close()
+	}()
+
 	err = ws.WriteMessage(websocket.TextMessage, []byte("Welcome to the UDDI server!"))
 	if err != nil {
 		log.Println(err)
