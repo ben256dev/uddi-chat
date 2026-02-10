@@ -232,7 +232,12 @@ func main() {
 
 	http.HandleFunc("/ws", websocketEndpoint)
 
-	fmt.Println("Server started on :8080")
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8080"
+    }
 
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	fmt.Println("Server started on :" + port)
+
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
